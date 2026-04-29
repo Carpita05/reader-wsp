@@ -1,0 +1,21 @@
+# Dependencias de Node.js
+node_modules/
+
+# Sesión de WhatsApp (¡contiene credenciales!)
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Datos de clientes (sensibles, gestionar por separado)
+datos_clientes.csv
+
+# Variables de entorno (contienen claves secretas — NUNCA subir a Git)
+.env
+# La plantilla SÍ se commitea para que otros sepan qué variables necesitan
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# Documentación técnica
+DTD_WhatsApp_Bot_NodeJS.md
