@@ -60,7 +60,7 @@ Serie Favorita: Breaking Bad
 
 **Si envían texto libre:**
 ```text
-Hola soy Montse tengo 45 años y me gusta Breaking Bad...
+Hola soy Pepe tengo 24 años y me gusta The Office...
 ```
 El bot delegará automáticamente en la **Inteligencia Artificial** para deducir el formato y guardará igualmente los campos de forma correcta.
 
