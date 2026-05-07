@@ -1,21 +1,59 @@
-# Dependencias de Node.js
-node_modules/
+# ─────────────────────────────────────────────────────────────
+# .gitignore — WhatsApp Data Collector Bot
+# ─────────────────────────────────────────────────────────────
 
-# Sesión de WhatsApp (¡contiene credenciales!)
+# ── Dependencias de Node.js ───────────────────────────────────
+node_modules/
+package-lock.json
+
+# ── Variables de entorno (claves secretas — NUNCA subir) ──────
+.env
+.env.local
+.env.*.local
+# La plantilla SÍ se commitea: documenta qué variables son necesarias
+!.env.example
+
+# ── Sesión de WhatsApp (legacy whatsapp-web.js) ───────────────
+# Contienen tokens de sesión equivalentes a tu cuenta de WhatsApp
 .wwebjs_auth/
 .wwebjs_cache/
 
-# Datos de clientes (sensibles, gestionar por separado)
+# ── Sesión de Evolution API / Baileys ─────────────────────────
+# Baileys almacena credenciales de sesión en estas carpetas/archivos
+baileys_store/
+baileys_auth_info/
+auth_info_baileys/
+auth_info_multi/
+instances/
+# Archivos de credenciales de Baileys (pueden aparecer en la raíz)
+creds.json
+keys/
+
+# ── Datos de clientes (información sensible/personal — RGPD) ──
 datos_clientes.csv
+*.csv
+exports/
+backups/
 
-# Variables de entorno (contienen claves secretas — NUNCA subir a Git)
-.env
-# La plantilla SÍ se commitea para que otros sepan qué variables necesitan
-!.env.example
-
-# Logs
+# ── Logs ──────────────────────────────────────────────────────
 *.log
+logs/
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# Documentación técnica
+# ── Archivos de sistema operativo ────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editores e IDEs ───────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# ── Documentación técnica interna ─────────────────────────────
 DTD_WhatsApp_Bot_NodeJS.md

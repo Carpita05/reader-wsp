@@ -1,11 +1,16 @@
 /**
  * ============================================================
- * WHATSAPP DATA COLLECTOR BOT
+ * WHATSAPP DATA COLLECTOR BOT — Evolution API Edition
  * ============================================================
  * Descripción: Bot que recoge datos (Nombre, Edad, Serie Favorita)
  * enviados por clientes vía WhatsApp y los persiste en un CSV local.
  *
- * Stack: Node.js + whatsapp-web.js + qrcode-terminal + fs (nativo)
+ * Arquitectura:
+ *   - Evolution API (Baileys) gestiona la conexión con WhatsApp.
+ *   - Este proceso recibe eventos vía Webhook HTTP (POST /webhook).
+ *   - La lógica de extracción (Regex + IA fallback) se mantiene intacta.
+ *
+ * Stack: Node.js + http (nativo) + Evolution API + fs (nativo)
  * ============================================================
  */
 
@@ -14,15 +19,27 @@
 // Carga las variables del archivo .env antes que cualquier otra importación
 require('dotenv').config();
 
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
-const fs = require('fs');
+const http = require('http');
+const fs   = require('fs');
 const path = require('path');
-const { extractDataWithAI } = require('./aiExtractor');
+
+const { extractDataWithAI }                       = require('./aiExtractor');
+const { validateConfig, sendTextMessage }         = require('./providers/evolutionApi');
+
+// ─────────────────────────────────────────────────────────────
+// VALIDACIÓN TEMPRANA DE CONFIGURACIÓN (fail-fast)
+// ─────────────────────────────────────────────────────────────
+
+// Lanza una excepción y detiene el proceso si faltan variables de entorno
+// críticas para comunicarse con Evolution API.
+validateConfig();
 
 // ─────────────────────────────────────────────────────────────
 // CONFIGURACIÓN
 // ─────────────────────────────────────────────────────────────
+
+/** Puerto en el que escuchará el servidor de webhooks. */
+const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT, 10) || 3000;
 
 /** Ruta absoluta al archivo CSV de salida. */
 const CSV_FILE_PATH = path.join(__dirname, 'datos_clientes.csv');
@@ -156,116 +173,17 @@ function appendDataToCsv(telefono, data, callback) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// INICIALIZACIÓN DEL CLIENTE DE WHATSAPP
+// LÓGICA DE PROCESAMIENTO DE MENSAJES
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Crea el cliente de whatsapp-web.js.
+ * Procesa un mensaje entrante de WhatsApp recibido vía webhook de Evolution API.
+ * Replica exactamente el flujo que antes gestionaba el evento 'message' de whatsapp-web.js.
  *
- * LocalAuth: estrategia de autenticación que guarda la sesión en disco
- * (carpeta .wwebjs_auth). Permite que el bot se reconecte automáticamente
- * sin re-escanear el QR en futuros arranques.
- *
- * puppeteer.args: optimizaciones para entornos sin GUI (headless).
+ * @param {string} senderPhone  - Número del remitente (formato: "34612345678").
+ * @param {string} messageBody  - Cuerpo de texto del mensaje.
  */
-const client = new Client({
-  authStrategy: new LocalAuth({
-    dataPath: path.join(__dirname, '.wwebjs_auth'), // Directorio donde se almacena la sesión
-  }),
-  puppeteer: {
-    headless: true,
-    args: [
-      '--no-sandbox',              // Requerido en muchos entornos Linux/CI
-      '--disable-setuid-sandbox',  // Seguridad de sandbox en Linux
-      '--disable-dev-shm-usage',   // Evita problemas de memoria compartida
-      '--disable-gpu',             // Innecesario en modo headless
-    ],
-  },
-});
-
-// ─────────────────────────────────────────────────────────────
-// EVENTOS DEL CLIENTE
-// ─────────────────────────────────────────────────────────────
-
-/**
- * EVENTO: 'qr'
- * Se dispara cuando WhatsApp Web genera un nuevo código QR.
- * Ocurre en la primera ejecución o cuando la sesión ha expirado.
- * qrcode-terminal dibuja el QR directamente en la consola.
- */
-client.on('qr', (qr) => {
-  console.log('\n════════════════════════════════════════════');
-  console.log('  📱 Escanea el QR con tu app de WhatsApp:');
-  console.log('  (WhatsApp → Ajustes → Dispositivos vinculados)');
-  console.log('════════════════════════════════════════════\n');
-  qrcode.generate(qr, { small: true });
-});
-
-/**
- * EVENTO: 'ready'
- * Se dispara cuando la sesión de WhatsApp está completamente establecida
- * y el cliente está listo para enviar/recibir mensajes.
- */
-client.on('ready', () => {
-  console.log('\n✅ Cliente WhatsApp listo. Esperando mensajes...\n');
-});
-
-/**
- * EVENTO: 'authenticated'
- * Se dispara cuando la autenticación se completa con éxito
- * (tanto en primera autenticación como en reconexiones).
- */
-client.on('authenticated', () => {
-  console.log('🔐 Sesión autenticada correctamente.');
-});
-
-/**
- * EVENTO: 'auth_failure'
- * Se dispara cuando la autenticación falla (sesión inválida o expirada).
- * En este caso, se debe borrar la carpeta .wwebjs_auth y reiniciar.
- */
-client.on('auth_failure', (msg) => {
-  console.error('❌ Fallo de autenticación:', msg);
-  console.error('💡 Solución: Borra la carpeta .wwebjs_auth y reinicia.');
-  process.exit(1);
-});
-
-/**
- * EVENTO: 'disconnected'
- * Se dispara cuando la sesión se desconecta (ej: cierre desde el móvil).
- */
-client.on('disconnected', (reason) => {
-  console.warn('⚠️  Cliente desconectado. Razón:', reason);
-});
-
-// ─────────────────────────────────────────────────────────────
-// EVENTO PRINCIPAL: PROCESAMIENTO DE MENSAJES ENTRANTES
-// ─────────────────────────────────────────────────────────────
-
-/**
- * EVENTO: 'message'
- * Se dispara por CADA mensaje que recibe el número de WhatsApp vinculado.
- * Aquí reside la lógica central del bot.
- *
- * @param {import('whatsapp-web.js').Message} msg - Objeto mensaje de whatsapp-web.js
- */
-client.on('message', async (msg) => {
-  // ── Guardia 1: Ignorar mensajes de grupos ─────────────────
-  // msg.from en un grupo tiene formato: "XXXXXXXXXXX@g.us"
-  // msg.from en chat individual tiene formato: "XXXXXXXXXXX@c.us"
-  if (msg.from.endsWith('@g.us')) {
-    console.log(`[IGNORADO] Mensaje de grupo: ${msg.from}`);
-    return;
-  }
-
-  // ── Guardia 2: Ignorar mensajes del propio bot ────────────
-  if (msg.fromMe) {
-    return;
-  }
-
-  const senderPhone = msg.from.replace('@c.us', ''); // Ej: "34612345678"
-  const messageBody = msg.body || '';
-
+async function processIncomingMessage(senderPhone, messageBody) {
   console.log(`\n📨 Mensaje recibido de: ${senderPhone}`);
   console.log(`   Contenido: "${messageBody.substring(0, 80)}..."`);
 
@@ -309,14 +227,14 @@ client.on('message', async (msg) => {
       '```';
 
     try {
-      await msg.reply(helpMessage);
+      await sendTextMessage(senderPhone, helpMessage);
     } catch (replyError) {
       console.error('❌ Error al enviar mensaje de ayuda:', replyError.message);
     }
     return;
   }
 
-  // ── Paso 3: Datos extraídos correctamente → Loguear ──────
+  // ── Datos extraídos correctamente → Loguear ──────────────
   console.log('✅ Datos extraídos:');
   console.log(`   Nombre:         ${extractedData.nombre}`);
   console.log(`   Edad:           ${extractedData.edad}`);
@@ -329,7 +247,8 @@ client.on('message', async (msg) => {
 
       // Notificar al usuario que algo falló (sin exponer detalles técnicos)
       try {
-        await msg.reply(
+        await sendTextMessage(
+          senderPhone,
           '⚠️ Recibimos tu información pero ocurrió un error al guardarla.\n' +
           'Por favor, inténtalo de nuevo en unos minutos.'
         );
@@ -339,7 +258,7 @@ client.on('message', async (msg) => {
       return;
     }
 
-    // ── Paso 5: Confirmación al usuario ──────────────────
+    // ── Paso 5: Confirmación al usuario ──────────────────────
     console.log(`💾 Datos guardados en CSV para el número: ${senderPhone}`);
 
     const confirmationMessage =
@@ -350,23 +269,145 @@ client.on('message', async (msg) => {
       '_Gracias por enviarnos tu información. Nos pondremos en contacto contigo pronto._';
 
     try {
-      await msg.reply(confirmationMessage);
+      await sendTextMessage(senderPhone, confirmationMessage);
       console.log(`📤 Confirmación enviada a: ${senderPhone}`);
     } catch (replyError) {
       console.error('❌ Error al enviar confirmación:', replyError.message);
     }
   });
-});
+}
+
+// ─────────────────────────────────────────────────────────────
+// SERVIDOR WEBHOOK HTTP
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Lee el body completo de una request HTTP como string.
+ * Necesario porque http nativo no parsea el body automáticamente.
+ *
+ * @param {http.IncomingMessage} req
+ * @returns {Promise<string>}
+ */
+function readRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk.toString(); });
+    req.on('end',  () => resolve(body));
+    req.on('error', reject);
+  });
+}
+
+/**
+ * Handler principal del servidor HTTP.
+ *
+ * Evolution API enviará eventos POST a este endpoint cada vez que
+ * ocurra un evento en la instancia (mensaje recibido, estado cambiado, etc.).
+ *
+ * Estructura del payload de Evolution API v2 (evento MESSAGES_UPSERT):
+ * {
+ *   "event": "messages.upsert",
+ *   "instance": "nombre_instancia",
+ *   "data": {
+ *     "key": { "remoteJid": "34612345678@s.whatsapp.net", "fromMe": false, ... },
+ *     "message": { "conversation": "Hola!" }
+ *   }
+ * }
+ */
+async function webhookHandler(req, res) {
+  // Solo procesamos peticiones POST a /webhook
+  if (req.method !== 'POST' || req.url !== '/webhook') {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not Found' }));
+    return;
+  }
+
+  let payload;
+  try {
+    const rawBody = await readRequestBody(req);
+    payload = JSON.parse(rawBody);
+  } catch (_err) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+    return;
+  }
+
+  // Respuesta 200 inmediata: Evolution API necesita un ACK rápido.
+  // El procesamiento real ocurre de forma asíncrona después del reply.
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ status: 'received' }));
+
+  // ── Filtros de eventos ────────────────────────────────────
+
+  // Solo nos interesan los eventos de mensajes nuevos
+  const event = payload?.event;
+  if (event !== 'messages.upsert') {
+    return;
+  }
+
+  const data       = payload?.data;
+  const remoteJid  = data?.key?.remoteJid ?? '';
+  const fromMe     = data?.key?.fromMe ?? false;
+
+  // Ignorar mensajes enviados por el propio bot
+  if (fromMe) return;
+
+  // Ignorar mensajes de grupos (el JID de grupo termina en @g.us)
+  if (remoteJid.endsWith('@g.us')) {
+    console.log(`[IGNORADO] Mensaje de grupo: ${remoteJid}`);
+    return;
+  }
+
+  // Extraer el número limpio (quitando @s.whatsapp.net o @c.us)
+  const senderPhone = remoteJid.replace(/@[a-z.]+$/i, '');
+
+  // Extraer el texto del mensaje (puede venir en varias propiedades según el tipo)
+  const messageBody =
+    data?.message?.conversation               ?? // Texto plano
+    data?.message?.extendedTextMessage?.text  ?? // Respuesta con cita
+    '';
+
+  // Ignorar mensajes sin texto (imágenes, stickers, etc. sin caption)
+  if (!messageBody.trim()) {
+    return;
+  }
+
+  // Procesar de forma asíncrona sin bloquear el servidor
+  processIncomingMessage(senderPhone, messageBody).catch((err) => {
+    console.error('❌ Error crítico al procesar mensaje:', err.message);
+  });
+}
 
 // ─────────────────────────────────────────────────────────────
 // ARRANQUE DE LA APLICACIÓN
 // ─────────────────────────────────────────────────────────────
 
-console.log('🚀 Iniciando WhatsApp Data Collector Bot...');
-console.log('━'.repeat(50));
+console.log('🚀 Iniciando WhatsApp Data Collector Bot (Evolution API)...');
+console.log('━'.repeat(55));
 
 // 1. Preparar el archivo CSV
 initializeCsvFile();
 
-// 2. Lanzar el cliente de WhatsApp (inicia Puppeteer + carga WA Web)
-client.initialize();
+// 2. Levantar el servidor de webhooks
+const server = http.createServer(webhookHandler);
+
+server.listen(WEBHOOK_PORT, () => {
+  console.log(`✅ Servidor de webhooks escuchando en: http://localhost:${WEBHOOK_PORT}/webhook`);
+  console.log('');
+  console.log('📋 Configuración activa:');
+  console.log(`   Evolution API URL:      ${process.env.EVOLUTION_BASE_URL}`);
+  console.log(`   Instancia:              ${process.env.EVOLUTION_INSTANCE_NAME}`);
+  console.log(`   Puerto webhook local:   ${WEBHOOK_PORT}`);
+  console.log('');
+  console.log('⏳ Esperando eventos de Evolution API...');
+  console.log('━'.repeat(55));
+});
+
+// Manejo limpio de errores del servidor (ej: puerto ya en uso)
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`❌ El puerto ${WEBHOOK_PORT} ya está en uso. Cambia WEBHOOK_PORT en .env.`);
+  } else {
+    console.error('❌ Error en el servidor HTTP:', err.message);
+  }
+  process.exit(1);
+});
