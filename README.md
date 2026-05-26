@@ -1,14 +1,15 @@
-# 📱 WhatsApp Data Collector Bot
+# 📱 WhatsApp Data Collector Bot (Evolution API v2)
 
-Un bot automatizado de WhatsApp construido con **Node.js** que extrae datos de clientes (Nombre, Edad, Serie Favorita) a través de los mensajes recibidos y los almacena de forma segura en un archivo CSV local.
+Un bot conversacional para WhatsApp construido con **Node.js** que actúa como un agente de reservas y recopilación de datos. Extrae información de los clientes de manera progresiva a través de múltiples mensajes, validando los datos en tiempo real y persistiendo la información de manera segura en un archivo CSV local.
 
-## ✨ Características
+## ✨ Características Principales
 
-- ⚡ **Extracción Instantánea (Regex)**: Procesa mensajes con el formato exacto sin latencia.
-- 🧠 **Fallback con Inteligencia Artificial**: Si el usuario envía los datos en lenguaje natural o con formato libre, el bot utiliza **Google Gemini 2.5 Flash** para procesar el mensaje, entender el contexto y extraer los datos correctamente.
-- 💾 **Persistencia Segura**: Guarda toda la información de forma incremental en `datos_clientes.csv` cumpliendo con el estándar RFC 4180.
-- 🔒 **Sesión Persistente**: Inicias sesión escaneando un código QR una vez y el bot guarda la sesión (`.wwebjs_auth`) para no pedirte el móvil cada vez que lo arrancas.
-- 🛡️ **Prevención de Spam**: Ignora automáticamente mensajes de grupos (`@g.us`) y mensajes propios.
+- 🔄 **Conversación Multi-Turno**: El bot no exige que el cliente envíe todos los datos en un solo mensaje. Acumula la información a lo largo de varios mensajes.
+- 🗣️ **Asistente Proactivo**: Si faltan datos, el bot pregunta automáticamente por la información faltante siguiendo un flujo lógico (Nombre → Edad → Hora → Serie → Color).
+- 🧠 **Inteligencia Artificial Integrada**: Usa **Google Gemini 2.5 Flash** para extraer datos estructurados a partir del lenguaje natural, permitiendo al usuario hablar con total libertad y corregir sus respuestas (ej: "mejor resérvame a las 6").
+- ⏱️ **Validación de Horarios**: Verifica que la hora solicitada por el cliente se encuentre dentro del horario comercial establecido (Mañanas: 10:30-14:30 | Tardes: 16:30-20:30).
+- 💾 **Memoria Persistente**: Mantiene el estado de cada usuario en `sessions.json` para que las conversaciones a medias no se pierdan si el servidor se reinicia, limpiando las sesiones inactivas tras 15 minutos.
+- 🔗 **Arquitectura Robusta (Evolution API)**: Desacoplado de librerías locales inestables. Utiliza webhooks HTTP estándar para recibir eventos de [Evolution API](https://evolution-api.com/).
 
 ---
 
@@ -16,12 +17,13 @@ Un bot automatizado de WhatsApp construido con **Node.js** que extrae datos de c
 
 ### 1. Requisitos previos
 - **Node.js** v18 o superior instalado en tu sistema.
-- Una cuenta gratuita de Google AI Studio para la clave de API.
+- Instancia activa de **Evolution API** v2 vinculada a tu número de WhatsApp.
+- Cuenta gratuita de [Google AI Studio](https://aistudio.google.com/app/apikey) para la API Key de Gemini.
 
 ### 2. Clonar el repositorio e instalar dependencias
 ```bash
 git clone <url_de_tu_repositorio>
-cd LeectorDeMensajesWhatsapp
+cd LectorDeMensajesWhatsapp
 npm install
 ```
 
@@ -30,61 +32,76 @@ Copia el archivo de plantilla `.env.example` y renómbralo a `.env`:
 ```bash
 cp .env.example .env
 ```
-Abre `.env` y añade tu clave de API de Gemini:
+Edita el archivo `.env` con tus credenciales reales:
 ```env
+# Configuración de Inteligencia Artificial
 AI_PROVIDER=gemini
-GEMINI_API_KEY=tu_clave_api_aqui
+GEMINI_API_KEY=tu_clave_api_gemini_aqui
+
+# Configuración de Evolution API
+EVOLUTION_BASE_URL=http://tu-evolution-api.com:8080
+EVOLUTION_API_KEY=tu_global_api_key_de_evolution
+EVOLUTION_INSTANCE_NAME=tu_nombre_de_instancia
+
+# Puerto local donde el bot recibirá los Webhooks
+WEBHOOK_PORT=3000
 ```
-> **Nota**: Puedes obtener tu API Key gratis en [Google AI Studio](https://aistudio.google.com/app/apikey).
+
+### 4. Configurar el Webhook en Evolution API
+Debes indicarle a tu instancia de Evolution API que envíe los eventos de los mensajes a este bot. Esto se hace mediante una petición a tu servidor de Evolution API configurando la URL de webhook:
+`http://<tu-ip-o-dominio>:<WEBHOOK_PORT>/webhook` (Escuchando el evento `MESSAGES_UPSERT`).
 
 ---
 
 ## 🏃 Uso
 
-Para iniciar el bot, simplemente ejecuta:
+Para iniciar el bot, ejecuta en la terminal:
 ```bash
 npm start
 ```
+Verás un mensaje indicando que el servidor HTTP está escuchando y esperando eventos.
 
-1. La primera vez, el bot imprimirá un **Código QR** en la consola.
-2. Abre WhatsApp en tu teléfono, ve a **Dispositivos Vinculados** y escanea el QR.
-3. ¡Listo! El bot mostrará `✅ Cliente WhatsApp listo. Esperando mensajes...` y empezará a trabajar.
+### Ejemplo de Flujo Conversacional
+El bot captura progresivamente **Nombre, Edad, Hora de Reserva, Serie Favorita y Color Favorito**.
 
-### Formato esperado de los usuarios
-Para la ruta más rápida (Regex), el usuario debe enviar:
-```text
-Nombre: Laura García
-Edad: 29
-Serie Favorita: Breaking Bad
-```
-
-**Si envían texto libre:**
-```text
-Hola soy Pepe tengo 24 años y me gusta The Office...
-```
-El bot delegará automáticamente en la **Inteligencia Artificial** para deducir el formato y guardará igualmente los campos de forma correcta.
+1. **Cliente:** "Hola soy Juan"
+   *Bot detecta:* `Nombre: Juan`.
+   *Bot responde:* "¡Perfecto, Juan! 😊 ¿Cuántos años tienes?"
+2. **Cliente:** "Tengo 65 años"
+   *Bot detecta:* `Edad: 65`.
+   *Bot responde:* "¿A qué hora quieres reservar? 🕐 ..."
+3. **Cliente:** "Quería reservar para las 5"
+   *Bot normaliza a:* `17:00` (Valida turno de tarde).
+   *Bot responde:* "¡Genial! 🎉 ¿Cuál es tu serie favorita?"
+4. **Cliente:** "Me gusta La vida es bella"
+   *Bot responde:* "¡Ya casi terminamos! 🎨 ¿Cuál es tu color favorito?"
+5. **Cliente:** "El rojo"
+   *Bot guarda el CSV, limpia la sesión y responde:* "✅ ¡Reserva confirmada!..."
 
 ---
 
 ## 📂 Estructura del Proyecto
 
-\`\`\`text
-LeectorDeMensajesWhatsapp/
-├── index.js               # Archivo principal y eventos de WhatsApp
-├── aiExtractor.js         # Módulo central Strategy para IA
+```text
+LectorDeMensajesWhatsapp/
+├── index.js               # Servidor Webhook principal y orquestador del flujo
+├── sessionStore.js        # Gestión de memoria y persistencia (sessions.json)
+├── timeValidator.js       # Lógica de validación de rangos horarios para reservas
+├── aiExtractor.js         # Módulo central Strategy para IA (recoge datos parciales)
 ├── providers/
-│   └── gemini.js          # Adaptador de la API de Google Gemini (SDK actual v1)
+│   ├── gemini.js          # Adaptador de la API de Google Gemini y Prompts
+│   └── evolutionApi.js    # Cliente HTTP para responder mensajes vía Evolution API
+├── datos_clientes.csv     # Base de datos final generada automáticamente
 ├── package.json           # Dependencias del proyecto
-├── .env.example           # Plantilla pública de variables de entorno
-└── .gitignore             # Archivos excluidos de Git (sesiones, claves, DB local)
-\`\`\`
+└── .env                   # Variables de entorno y secretos (ignorado en git)
+```
 
 ## 🛠 Tecnologías Utilizadas
 
-- [whatsapp-web.js](https://wwebjs.dev/) - Cliente de WhatsApp no oficial
-- [@google/genai](https://www.npmjs.com/package/@google/genai) - SDK Oficial de Gemini
-- [qrcode-terminal](https://www.npmjs.com/package/qrcode-terminal) - Dibujo del código QR en terminal
-- [dotenv](https://www.npmjs.com/package/dotenv) - Gestión de variables de entorno seguras
+- **Evolution API** - Motor de conexión estable para WhatsApp.
+- **Node.js (http nativo / fs)** - Servidor ultraligero y gestión de archivos (CSV/JSON).
+- **@google/genai** - SDK Oficial de Gemini para extracción de entidades mediante IA generativa.
+- **dotenv** - Gestión de variables de entorno seguras.
 
 ---
-*Desarrollado para automatizar la captación de leads de forma local y 100% privada.*
+*Desarrollado para automatizar la captación de reservas y datos estructurados de clientes.*
