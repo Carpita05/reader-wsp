@@ -1,14 +1,24 @@
 /**
  * ============================================================
- * WHATSAPP DATA COLLECTOR BOT — Evolution API Edition
+ * WHATSAPP DATA COLLECTOR BOT — Evolution API Edition (v2)
  * ============================================================
- * Descripción: Bot que recoge datos (Nombre, Edad, Serie Favorita)
- * enviados por clientes vía WhatsApp y los persiste en un CSV local.
+ * Descripción: Bot conversacional que recoge datos de clientes
+ * (Nombre, Edad, Serie Favorita, Hora de Reserva) a lo largo de
+ * múltiples mensajes, manteniendo el estado de sesión por cliente.
  *
  * Arquitectura:
  *   - Evolution API (Baileys) gestiona la conexión con WhatsApp.
  *   - Este proceso recibe eventos vía Webhook HTTP (POST /webhook).
- *   - La lógica de extracción (Regex + IA fallback) se mantiene intacta.
+ *   - sessionStore.js mantiene el estado de conversación por usuario.
+ *   - Gemini AI extrae datos en lenguaje natural de cada mensaje.
+ *   - timeValidator.js valida que la hora esté en el horario de apertura.
+ *
+ * Flujo multi-turno:
+ *   1. Llega un mensaje → se extrae lo que haya con IA.
+ *   2. Se fusiona con la sesión existente del cliente.
+ *   3. Si la hora está fuera de horario → se rechaza con aviso.
+ *   4. Si faltan datos → se pregunta activamente el campo que falta.
+ *   5. Cuando todos los campos están completos → se guarda en CSV y confirma.
  *
  * Stack: Node.js + http (nativo) + Evolution API + fs (nativo)
  * ============================================================
@@ -20,11 +30,13 @@
 require('dotenv').config();
 
 const http = require('http');
-const fs   = require('fs');
+const fs = require('fs');
 const path = require('path');
 
-const { extractDataWithAI }                       = require('./aiExtractor');
-const { validateConfig, sendTextMessage }         = require('./providers/evolutionApi');
+const { extractDataWithAI } = require('./aiExtractor');
+const { validateConfig, sendTextMessage } = require('./providers/evolutionApi');
+const { getSession, mergeData, isSessionComplete, clearSession } = require('./sessionStore');
+const { validateReservationTime, getAvailableSlotsText } = require('./timeValidator');
 
 // ─────────────────────────────────────────────────────────────
 // VALIDACIÓN TEMPRANA DE CONFIGURACIÓN (fail-fast)
@@ -44,25 +56,11 @@ const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT, 10) || 3000;
 /** Ruta absoluta al archivo CSV de salida. */
 const CSV_FILE_PATH = path.join(__dirname, 'datos_clientes.csv');
 
-/** Cabecera del CSV. Se escribe SOLO si el archivo no existe aún. */
-const CSV_HEADER = 'Timestamp,Telefono,Nombre,Edad,SerieFavorita\r\n';
-
 /**
- * Expresión Regular principal para validar y capturar los tres campos.
- *
- * Desglose del patrón:
- *   Nombre:\s*          → Literal "Nombre:" seguido de cero o más espacios
- *   (.+?)               → Grupo 1 (Nombre): captura uno o más caracteres de forma no greedy
- *   [\r\n]+             → Uno o más saltos de línea (compatible \r\n, \n, \r)
- *   Edad:\s*            → Literal "Edad:" seguido de cero o más espacios
- *   (\d+)               → Grupo 2 (Edad): captura solo dígitos numéricos
- *   [\r\n]+             → Uno o más saltos de línea
- *   Serie Favorita:\s*  → Literal "Serie Favorita:" seguido de cero o más espacios
- *   (.+)                → Grupo 3 (Serie): captura el resto de la línea
- *
- * Flags: 'i' → case-insensitive (acepta "nombre:", "NOMBRE:", etc.)
+ * Cabecera del CSV.
+ * NOTA: Se añadió la columna HoraReserva respecto a la versión anterior.
  */
-const DATA_REGEX = /Nombre:\s*(.+?)[\r\n]+Edad:\s*(\d+)[\r\n]+Serie Favorita:\s*(.+)/i;
+const CSV_HEADER = 'Timestamp,Telefono,Nombre,Edad,SerieFavorita,HoraReserva,ColorFavorito\r\n';
 
 // ─────────────────────────────────────────────────────────────
 // INICIALIZACIÓN DEL ARCHIVO CSV
@@ -76,43 +74,11 @@ const DATA_REGEX = /Nombre:\s*(.+?)[\r\n]+Edad:\s*(\d+)[\r\n]+Serie Favorita:\s*
 function initializeCsvFile() {
   fs.writeFile(CSV_FILE_PATH, CSV_HEADER, { flag: 'wx' }, (err) => {
     if (err && err.code !== 'EEXIST') {
-      // Solo registra error si NO es el error esperado "archivo ya existe"
       console.error('❌ Error al crear el archivo CSV:', err.message);
     } else if (!err) {
       console.log(`📄 Archivo CSV creado en: ${CSV_FILE_PATH}`);
     }
   });
-}
-
-// ─────────────────────────────────────────────────────────────
-// FUNCIÓN DE EXTRACCIÓN DE DATOS (REGEX)
-// ─────────────────────────────────────────────────────────────
-
-/**
- * Aplica la expresión regular al texto del mensaje e intenta extraer
- * los tres campos de datos.
- *
- * @param {string} messageBody - Cuerpo completo del mensaje de WhatsApp.
- * @returns {{ nombre: string, edad: string, serie: string } | null}
- *   Objeto con los datos extraídos, o null si el formato no coincide.
- */
-function extractDataFromMessage(messageBody) {
-  const match = messageBody.match(DATA_REGEX);
-
-  // Si no hay coincidencia, el mensaje no tiene el formato esperado
-  if (!match) {
-    return null;
-  }
-
-  // match[0] → cadena completa que coincidió
-  // match[1] → Grupo 1: Nombre
-  // match[2] → Grupo 2: Edad
-  // match[3] → Grupo 3: Serie Favorita
-  return {
-    nombre: match[1].trim(),
-    edad:   match[2].trim(),
-    serie:  match[3].trim(),
-  };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -122,23 +88,15 @@ function extractDataFromMessage(messageBody) {
 /**
  * Sanitiza un valor de texto para uso seguro en CSV.
  * Elimina comas (romperían el CSV) y saltos de línea incrustados.
- * Si el valor contiene espacios u otros caracteres especiales,
- * lo envuelve en comillas dobles según el estándar RFC 4180.
  *
  * @param {string} value - Valor a sanitizar.
  * @returns {string} Valor seguro para insertar en una columna CSV.
  */
 function sanitizeForCsv(value) {
-  // Asegura que el valor sea un string (la IA devuelve la edad como número)
-  // Si es null o undefined, lo deja en blanco
   const strValue = value === null || value === undefined ? '' : String(value);
-
-  // Elimina saltos de línea incrustados en el valor
   const cleaned = strValue.replace(/[\r\n]+/g, ' ');
 
-  // Si el valor contiene comas, comillas o espacios, se cita
   if (cleaned.includes(',') || cleaned.includes('"') || cleaned.includes(' ')) {
-    // Escapa las comillas dobles internas duplicándolas (estándar CSV)
     return `"${cleaned.replace(/"/g, '""')}"`;
   }
 
@@ -151,130 +109,185 @@ function sanitizeForCsv(value) {
 
 /**
  * Construye una fila CSV y la añade al archivo de forma asíncrona.
- * Usa appendFile para NO sobrescribir datos preexistentes.
  *
  * @param {string} telefono - Número de teléfono del remitente.
- * @param {{ nombre: string, edad: string, serie: string }} data - Datos extraídos.
+ * @param {{ nombre: string, edad: number, serie: string, hora: string }} data
  * @param {Function} callback - Se llama con (error | null) al finalizar.
  */
 function appendDataToCsv(telefono, data, callback) {
-  const timestamp = new Date().toISOString(); // Ej: "2025-07-15T10:30:05.123Z"
+  const timestamp = new Date().toISOString();
 
-  // Construir fila: cada campo pasa por sanitizeForCsv
   const row = [
     sanitizeForCsv(timestamp),
     sanitizeForCsv(telefono),
     sanitizeForCsv(data.nombre),
     sanitizeForCsv(data.edad),
     sanitizeForCsv(data.serie),
+    sanitizeForCsv(data.hora),
+    sanitizeForCsv(data.color),
   ].join(',') + '\r\n';
 
   fs.appendFile(CSV_FILE_PATH, row, 'utf8', callback);
 }
 
 // ─────────────────────────────────────────────────────────────
-// LÓGICA DE PROCESAMIENTO DE MENSAJES
+// HELPER: GENERAR PREGUNTA SOBRE EL CAMPO QUE FALTA
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Procesa un mensaje entrante de WhatsApp recibido vía webhook de Evolution API.
- * Replica exactamente el flujo que antes gestionaba el evento 'message' de whatsapp-web.js.
+ * Dado el estado actual de la sesión, genera el mensaje que el bot
+ * debe enviar para solicitar activamente el siguiente dato que falta.
+ * El orden de prioridad es: nombre → edad → hora → serie.
  *
- * @param {string} senderPhone  - Número del remitente (formato: "34612345678").
+ * @param {{ nombre, edad, serie, hora }} session
+ * @param {string} [context] - Nombre del cliente si ya se conoce, para personalizar.
+ * @returns {string} Mensaje de WhatsApp listo para enviar.
+ */
+function buildNextQuestionMessage(session) {
+  const greeting = session.nombre ? `${session.nombre.split(' ')[0]}, ` : '';
+
+  if (!session.nombre) {
+    return '👋 ¡Hola! Para gestionar tu reserva necesito algunos datos.\n\n¿*Cuál es tu nombre completo?*';
+  }
+
+  if (!session.edad) {
+    return `¡Perfecto, ${session.nombre.split(' ')[0]}! 😊\n\n¿*Cuántos años tienes?*`;
+  }
+
+  if (!session.hora) {
+    return (
+      `${greeting}¿*A qué hora quieres reservar?*\n\n` +
+      `🕐 Nuestro horario de reservas:\n` +
+      `   • Turno mañana: *10:30 – 14:30*\n` +
+      `   • Turno tarde:  *16:30 – 20:30*`
+    );
+  }
+
+  if (!session.serie) {
+    return `${greeting}¡Genial! 🎉\n\n¿*Cuál es tu serie favorita?*`;
+  }
+
+  if (!session.color) {
+    return `${greeting}¡Ya casi terminamos! 🎨\n\n¿*Cuál es tu color favorito?*`;
+  }
+
+  // No debería llegar aquí si isSessionComplete es correcto
+  return '¿Algo más en lo que pueda ayudarte?';
+}
+
+// ─────────────────────────────────────────────────────────────
+// LÓGICA PRINCIPAL DE PROCESAMIENTO DE MENSAJES (MULTI-TURNO)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Procesa un mensaje entrante de WhatsApp aplicando lógica multi-turno:
+ * acumula datos parciales en la sesión del cliente y solo guarda en CSV
+ * cuando todos los campos obligatorios están disponibles.
+ *
+ * @param {string} senderPhone  - Número del remitente (ej: "34612345678").
  * @param {string} messageBody  - Cuerpo de texto del mensaje.
  */
 async function processIncomingMessage(senderPhone, messageBody) {
   console.log(`\n📨 Mensaje recibido de: ${senderPhone}`);
-  console.log(`   Contenido: "${messageBody.substring(0, 80)}..."`);
+  console.log(`   Contenido: "${messageBody.substring(0, 100)}"`);
 
-  // ── Paso 1: Intentar extraer datos con Regex ──────────────
-  // Camino rápido, gratuito e instantáneo para el formato estándar.
-  let extractedData = extractDataFromMessage(messageBody);
+  // ── Paso 1: Extraer datos del mensaje actual con IA ────────
+  // La IA intenta sacar cualquier dato mencionado (aunque sea parcial).
+  let extractedData = null;
 
-  // ── Paso 2: Fallback → Extracción con IA ──────────────────
-  // Si la Regex falla (lenguaje natural libre, campos desordenados...),
-  // se delega en el modelo de IA como segundo intento.
-  if (!extractedData) {
-    console.log('🤖 Regex sin coincidencia. Intentando extracción con IA...');
-    const aiData = await extractDataWithAI(messageBody);
-
-    // Solo se acepta si la IA extrajo los 3 campos obligatorios
-    if (aiData && aiData.nombre && aiData.edad !== null && aiData.serie) {
-      extractedData = aiData;
-      console.log('✅ Datos extraídos por IA (fallback).');
-    } else {
-      console.warn('⚠️  La IA tampoco pudo extraer los 3 campos. Enviando ayuda.');
-    }
+  try {
+    console.log('🤖 Intentando extracción de datos con IA...');
+    extractedData = await extractDataWithAI(messageBody);
+  } catch (err) {
+    console.error('❌ Error al llamar a la IA:', err.message);
   }
 
-  // ── Paso 3: Ningún método pudo extraer datos → Pedir formato ──
-  if (!extractedData) {
-    console.warn(`⚠️  Formato no reconocido. Enviando instrucciones a ${senderPhone}`);
+  // ── Paso 2: Fusionar con la sesión existente ───────────────
+  // getSession crea una sesión vacía si el cliente es nuevo.
+  const session = getSession(senderPhone);
 
-    const helpMessage =
-      '❌ *No pude entender tu mensaje.*\n\n' +
-      'Por favor, envía tu información con el siguiente formato:\n\n' +
-      '```\n' +
-      'Nombre: Tu Nombre Completo\n' +
-      'Edad: Tu Edad\n' +
-      'Serie Favorita: Nombre de la Serie\n' +
-      '```\n\n' +
-      '📝 *Ejemplo:*\n' +
-      '```\n' +
-      'Nombre: Laura García\n' +
-      'Edad: 29\n' +
-      'Serie Favorita: Breaking Bad\n' +
-      '```';
-
-    try {
-      await sendTextMessage(senderPhone, helpMessage);
-    } catch (replyError) {
-      console.error('❌ Error al enviar mensaje de ayuda:', replyError.message);
-    }
-    return;
+  if (extractedData && typeof extractedData === 'object') {
+    mergeData(senderPhone, extractedData);
+    console.log('🔀 Datos fusionados en sesión:', JSON.stringify(getSession(senderPhone)));
+  } else {
+    console.warn('⚠️  La IA no extrajo datos útiles en este mensaje.');
   }
 
-  // ── Datos extraídos correctamente → Loguear ──────────────
-  console.log('✅ Datos extraídos:');
-  console.log(`   Nombre:         ${extractedData.nombre}`);
-  console.log(`   Edad:           ${extractedData.edad}`);
-  console.log(`   Serie Favorita: ${extractedData.serie}`);
+  // Releer sesión actualizada tras el merge
+  const currentSession = getSession(senderPhone);
 
-  // ── Paso 4: Persistir en CSV ──────────────────────────────
-  appendDataToCsv(senderPhone, extractedData, async (writeError) => {
-    if (writeError) {
-      console.error('❌ Error al escribir en CSV:', writeError.message);
+  // ── Paso 3: Validar hora si se acaba de establecer ─────────
+  if (currentSession.hora) {
+    const timeCheck = validateReservationTime(currentSession.hora);
+    if (!timeCheck.valid) {
+      // La hora está fuera del horario de apertura: avisar y limpiar el campo
+      console.warn(`⚠️  Hora inválida detectada: ${currentSession.hora}`);
+      // Eliminamos la hora inválida para que el bot vuelva a preguntar
+      mergeData(senderPhone, { hora: null });
 
-      // Notificar al usuario que algo falló (sin exponer detalles técnicos)
       try {
-        await sendTextMessage(
-          senderPhone,
-          '⚠️ Recibimos tu información pero ocurrió un error al guardarla.\n' +
-          'Por favor, inténtalo de nuevo en unos minutos.'
-        );
+        await sendTextMessage(senderPhone, timeCheck.reason);
       } catch (replyError) {
-        console.error('❌ Error al enviar mensaje de error al usuario:', replyError.message);
+        console.error('❌ Error al enviar mensaje de hora inválida:', replyError.message);
       }
       return;
     }
+  }
 
-    // ── Paso 5: Confirmación al usuario ──────────────────────
-    console.log(`💾 Datos guardados en CSV para el número: ${senderPhone}`);
+  // ── Paso 4: ¿Sesión completa? → Guardar y confirmar ───────
+  if (isSessionComplete(senderPhone)) {
+    const data = getSession(senderPhone);
+    console.log('✅ Sesión completa. Guardando en CSV...');
+    console.log(`   Nombre: ${data.nombre} | Edad: ${data.edad} | Hora: ${data.hora} | Serie: ${data.serie}`);
 
-    const confirmationMessage =
-      '✅ *¡Datos recibidos correctamente!*\n\n' +
-      `📛 *Nombre:* ${extractedData.nombre}\n` +
-      `🎂 *Edad:* ${extractedData.edad}\n` +
-      `📺 *Serie Favorita:* ${extractedData.serie}\n\n` +
-      '_Gracias por enviarnos tu información. Nos pondremos en contacto contigo pronto._';
+    appendDataToCsv(senderPhone, data, async (writeError) => {
+      if (writeError) {
+        console.error('❌ Error al escribir en CSV:', writeError.message);
+        try {
+          await sendTextMessage(
+            senderPhone,
+            '⚠️ Recibimos tu información pero ocurrió un error al guardarla.\n' +
+            'Por favor, inténtalo de nuevo en unos minutos.'
+          );
+        } catch (replyError) {
+          console.error('❌ Error al enviar mensaje de error al usuario:', replyError.message);
+        }
+        return;
+      }
 
-    try {
-      await sendTextMessage(senderPhone, confirmationMessage);
-      console.log(`📤 Confirmación enviada a: ${senderPhone}`);
-    } catch (replyError) {
-      console.error('❌ Error al enviar confirmación:', replyError.message);
-    }
-  });
+      // ── Limpiar sesión y confirmar ──────────────────────────
+      clearSession(senderPhone);
+      console.log(`💾 Datos guardados en CSV para: ${senderPhone}`);
+
+      const confirmationMessage =
+        '✅ *¡Reserva confirmada!*\n\n' +
+        `📛 *Nombre:*          ${data.nombre}\n` +
+        `🎂 *Edad:*            ${data.edad} años\n` +
+        `🕐 *Hora reserva:*    ${data.hora}\n` +
+        `📺 *Serie favorita:*  ${data.serie}\n` +
+        `🎨 *Color favorito:*  ${data.color}\n\n` +
+        '_¡Gracias! Nos vemos pronto. 🎉_';
+
+      try {
+        await sendTextMessage(senderPhone, confirmationMessage);
+        console.log(`📤 Confirmación enviada a: ${senderPhone}`);
+      } catch (replyError) {
+        console.error('❌ Error al enviar confirmación:', replyError.message);
+      }
+    });
+
+    return;
+  }
+
+  // ── Paso 5: Sesión incompleta → Preguntar el campo que falta
+  const question = buildNextQuestionMessage(currentSession);
+  console.log(`❓ Datos incompletos. Preguntando a ${senderPhone}: "${question.substring(0, 60)}..."`);
+
+  try {
+    await sendTextMessage(senderPhone, question);
+  } catch (replyError) {
+    console.error('❌ Error al enviar pregunta al usuario:', replyError.message);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -283,7 +296,6 @@ async function processIncomingMessage(senderPhone, messageBody) {
 
 /**
  * Lee el body completo de una request HTTP como string.
- * Necesario porque http nativo no parsea el body automáticamente.
  *
  * @param {http.IncomingMessage} req
  * @returns {Promise<string>}
@@ -292,7 +304,7 @@ function readRequestBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
     req.on('data', (chunk) => { body += chunk.toString(); });
-    req.on('end',  () => resolve(body));
+    req.on('end', () => resolve(body));
     req.on('error', reject);
   });
 }
@@ -332,21 +344,16 @@ async function webhookHandler(req, res) {
   }
 
   // Respuesta 200 inmediata: Evolution API necesita un ACK rápido.
-  // El procesamiento real ocurre de forma asíncrona después del reply.
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ status: 'received' }));
 
   // ── Filtros de eventos ────────────────────────────────────
-
-  // Solo nos interesan los eventos de mensajes nuevos
   const event = payload?.event;
-  if (event !== 'messages.upsert') {
-    return;
-  }
+  if (event !== 'messages.upsert') return;
 
-  const data       = payload?.data;
-  const remoteJid  = data?.key?.remoteJid ?? '';
-  const fromMe     = data?.key?.fromMe ?? false;
+  const data = payload?.data;
+  const remoteJid = data?.key?.remoteJid ?? '';
+  const fromMe = data?.key?.fromMe ?? false;
 
   // Ignorar mensajes enviados por el propio bot
   if (fromMe) return;
@@ -360,16 +367,14 @@ async function webhookHandler(req, res) {
   // Extraer el número limpio (quitando @s.whatsapp.net o @c.us)
   const senderPhone = remoteJid.replace(/@[a-z.]+$/i, '');
 
-  // Extraer el texto del mensaje (puede venir en varias propiedades según el tipo)
+  // Extraer el texto del mensaje (puede venir en varias propiedades)
   const messageBody =
-    data?.message?.conversation               ?? // Texto plano
-    data?.message?.extendedTextMessage?.text  ?? // Respuesta con cita
+    data?.message?.conversation ?? // Texto plano
+    data?.message?.extendedTextMessage?.text ?? // Respuesta con cita
     '';
 
   // Ignorar mensajes sin texto (imágenes, stickers, etc. sin caption)
-  if (!messageBody.trim()) {
-    return;
-  }
+  if (!messageBody.trim()) return;
 
   // Procesar de forma asíncrona sin bloquear el servidor
   processIncomingMessage(senderPhone, messageBody).catch((err) => {
@@ -381,7 +386,7 @@ async function webhookHandler(req, res) {
 // ARRANQUE DE LA APLICACIÓN
 // ─────────────────────────────────────────────────────────────
 
-console.log('🚀 Iniciando WhatsApp Data Collector Bot (Evolution API)...');
+console.log('🚀 Iniciando WhatsApp Data Collector Bot (Evolution API) v2...');
 console.log('━'.repeat(55));
 
 // 1. Preparar el archivo CSV

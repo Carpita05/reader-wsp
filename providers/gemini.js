@@ -8,7 +8,19 @@ const { GoogleGenAI } = require('@google/genai');
 
 const SYSTEM_PROMPT = `Rol: Eres un asistente experto en extracción de datos estructurados. Tu única tarea es analizar el mensaje que proporciona el usuario y extraer los datos clave requeridos.
 
-Objetivo: Extraer el "Nombre", la "Edad" (como número entero) y la "Serie Favorita" del texto proporcionado.
+Objetivo: Extraer el "Nombre", la "Edad" (como número entero), la "Serie Favorita", la "Hora de Reserva" y el "Color Favorito" del texto proporcionado.
+
+Reglas para la Hora de Reserva:
+- El negocio solo abre en dos turnos: 10:30–14:30 (mañana) y 16:30–20:30 (tarde).
+- Si el usuario menciona una hora sin indicar AM/PM (ej: "a las 5", "para las 6", "a las 7"):
+  * Si el número está entre 1 y 9: interpretar como tarde (sumar 12h). Ej: "las 5" → "17:00", "las 6" → "18:00".
+  * Si el número está entre 10 y 14: interpretar como mañana. Ej: "las 11" → "11:00".
+  * Si el usuario dice explícitamente "de la mañana" o "AM", usar horario AM.
+  * Si el usuario dice explícitamente "de la tarde", "de la noche" o "PM", usar horario PM.
+- Normaliza siempre al formato "HH:MM" en 24 horas. Ej: "17:00", "10:30", "20:00".
+- Si la hora mencionada está claramente fuera de ambos turnos (ej: "a las 3 de la mañana"), devuelve null para hora_reserva.
+- Si no se menciona ninguna hora, devuelve null.
+- Si el usuario cambia la hora (ej: "mejor a las 6"), extrae la nueva hora.
 
 Reglas estrictas de salida:
 - Debes responder ÚNICA Y EXCLUSIVAMENTE con un objeto JSON válido.
@@ -18,7 +30,7 @@ Reglas estrictas de salida:
 - No inventes ni deduzcas información que no esté explícitamente en el texto.
 
 Estructura exacta del JSON que debes devolver:
-{"nombre": "string o null", "edad": numero o null, "serie": "string o null"}`;
+{"nombre": "string o null", "edad": numero o null, "serie": "string o null", "hora_reserva": "HH:MM o null", "color_favorito": "string o null"}`;
 
 // ─────────────────────────────────────────────────────────────
 // FUNCIÓN PRINCIPAL DE EXTRACCIÓN
@@ -29,7 +41,7 @@ Estructura exacta del JSON que debes devolver:
  * Usa responseMimeType 'application/json' para forzar salida JSON nativa.
  *
  * @param {string} messageBody - Texto del mensaje de WhatsApp a analizar.
- * @returns {Promise<{ nombre: string|null, edad: number|null, serie: string|null }>}
+ * @returns {Promise<{ nombre: string|null, edad: number|null, serie: string|null, hora: string|null, color: string|null }>}
  * @throws {Error} Si la API falla o la respuesta no es JSON válido.
  */
 async function extract(messageBody) {
@@ -58,8 +70,11 @@ async function extract(messageBody) {
 
   return {
     nombre: parsed.nombre ?? null,
-    edad:   typeof parsed.edad === 'number' ? parsed.edad : null,
-    serie:  parsed.serie ?? null,
+    edad: typeof parsed.edad === 'number' ? parsed.edad : null,
+    serie: parsed.serie ?? null,
+    // hora_reserva viene del JSON del modelo; lo mapeamos a "hora" para consistencia interna
+    hora: parsed.hora_reserva ?? null,
+    color: parsed.color_favorito ?? null,
   };
 }
 

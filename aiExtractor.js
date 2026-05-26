@@ -11,7 +11,6 @@
 // Proveedores disponibles:
 //   - ./providers/gemini   → Google Gemini (activo)
 //   - ./providers/ollama   → Ollama local (futuro)
-//   - ./providers/openai   → OpenAI (futuro)
 // ─────────────────────────────────────────────────────────────
 
 // ⬇️  CAMBIA ESTA LÍNEA PARA CAMBIAR DE PROVEEDOR
@@ -40,6 +39,8 @@ async function extractDataWithAI(messageBody) {
       return null;
     }
 
+    // En modo multi-turno aceptamos resultados parciales (aunque todos sean null).
+    // La acumulación de campos se gestiona en sessionStore.js → mergeData().
     return data;
   } catch (err) {
     // Errores esperados: API key inválida, timeout, JSON malformado, red...
