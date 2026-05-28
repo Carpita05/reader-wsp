@@ -96,6 +96,44 @@ LectorDeMensajesWhatsapp/
 └── .env                   # Variables de entorno y secretos (ignorado en git)
 ```
 
+## 🔍 Solución de Problemas y Diagnóstico
+
+Si el bot no responde o los mensajes no se indexan en el CSV, sigue estos pasos de diagnóstico en tu consola de Node.js para identificar el origen del problema:
+
+### 1. El bot recibe el mensaje (se ve en la consola) pero no responde
+**Síntoma:** En la consola del bot aparece el mensaje recibido, la IA de Gemini extrae los datos correctamente, pero al final se muestra un error similar a:
+`❌ Error al enviar pregunta al usuario: [EvolutionAPI] sendTextMessage falló → fetch failed`
+
+* **Causa:** El bot procesa la información pero no puede comunicarse de vuelta con la instancia de Evolution API para enviar el mensaje de WhatsApp.
+* **Soluciones:**
+  1. **Verificar la URL base:** Asegúrate de que `EVOLUTION_BASE_URL` en tu archivo `.env` sea correcta y accesible (ej. `http://localhost:8080` si corre localmente).
+  2. **Verificar estado de Evolution API:** Abre la URL de tu instancia de Evolution API en el navegador o hazle un ping/curl para comprobar que está activa.
+  3. **Comprobar la API Key:** Confirma que la variable `EVOLUTION_API_KEY` en tu `.env` coincide exactamente con la clave de API global de tu Evolution API.
+  4. **Instancia activa:** Verifica que la instancia especificada en `EVOLUTION_INSTANCE_NAME` esté conectada a WhatsApp (código QR escaneado y estado "CONNECTED").
+
+### 2. No se registra ninguna actividad en la consola cuando alguien escribe
+**Síntoma:** El bot está encendido, pero al escribir al número de WhatsApp no se muestra ningún log de `📡 Petición entrante` o `📨 Mensaje recibido`.
+
+* **Causa:** Los eventos/webhooks enviados por Evolution API no están llegando al puerto de tu bot.
+* **Soluciones:**
+  1. **Probar el Webhook localmente:** Haz una petición GET en tu navegador a `http://localhost:3000/health`. Debería responder `{"status":"ok"}`. Si no responde, el bot no está corriendo o el puerto `3000` está ocupado.
+  2. **Configuración del Webhook en Evolution API:** Asegúrate de haber configurado el webhook en Evolution API apuntando a la dirección IP/URL correcta del bot con el path `/webhook` (ej: `http://localhost:3000/webhook`) y que esté activo para el evento `MESSAGES_UPSERT`.
+  3. **Exposición pública (si Evolution API está en la nube):** Si tu Evolution API está corriendo en un servidor en la nube y tu bot está corriendo en tu máquina local, Evolution API no podrá acceder a tu `localhost`. Debes usar una herramienta de túnel como **ngrok** para exponer tu puerto local:
+     ```bash
+     ngrok http 3000
+     ```
+     Luego, copia la URL HTTPS pública provista por ngrok (ej: `https://abcd-123.ngrok-free.app/webhook`) y configúrala como la URL de Webhook en la configuración de la instancia dentro de Evolution API.
+
+### 3. Error en la conexión con la Inteligencia Artificial (Gemini)
+**Síntoma:** Se registra un error `❌ Error en la extracción por IA: ...` o problemas con el API Key de Gemini.
+
+* **Causa:** La API Key de Gemini es inválida, expiró o no hay conexión hacia los servidores de Google.
+* **Soluciones:**
+  1. **Verificar API Key:** Asegúrate de que la variable `GEMINI_API_KEY` en tu `.env` no tenga espacios ni comillas adicionales y que corresponda a una clave válida de Google AI Studio.
+  2. **Conectividad a Google:** Asegúrate de que el entorno donde corre el bot tiene salida a internet sin restricciones para contactar con la API de Gemini.
+
+---
+
 ## 🛠 Tecnologías Utilizadas
 
 - **Evolution API** - Motor de conexión estable para WhatsApp.

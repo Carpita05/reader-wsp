@@ -160,6 +160,26 @@ function isSessionComplete(phone) {
 }
 
 /**
+ * Fuerza el valor de un campo específico de la sesión a null.
+ * A diferencia de mergeData(), sí acepta null para limpiar un campo.
+ * Uso: limpiar la hora cuando el usuario manda un horario inválido.
+ *
+ * @param {string} phone - Número de teléfono del cliente.
+ * @param {string} field - Nombre del campo a limpiar ('hora', 'nombre', etc.).
+ */
+function clearSessionField(phone, field) {
+  const session = getSession(phone);
+  if (Object.prototype.hasOwnProperty.call(session, field)) {
+    session[field] = null;
+    session.lastActivity = Date.now();
+    persistSessionsToDisk();
+    console.log(`🗑️  Campo '${field}' limpiado para: ${phone}`);
+  } else {
+    console.warn(`⚠️  clearSessionField: campo '${field}' no existe en la sesión.`);
+  }
+}
+
+/**
  * Elimina la sesión de un cliente (tras guardar correctamente en CSV).
  *
  * @param {string} phone - Número de teléfono del cliente.
@@ -215,4 +235,6 @@ module.exports = {
   mergeData,
   isSessionComplete,
   clearSession,
+  clearSessionField,
 };
+

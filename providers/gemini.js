@@ -45,11 +45,16 @@ Estructura exacta del JSON que debes devolver:
  * @throws {Error} Si la API falla o la respuesta no es JSON válido.
  */
 async function extract(messageBody) {
+  console.log('[Gemini] 🔑 Verificando GEMINI_API_KEY...');
   if (!process.env.GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY no está definida en las variables de entorno.');
   }
+  console.log('[Gemini] ✅ API Key presente (primeros 8 chars):', process.env.GEMINI_API_KEY.substring(0, 8) + '...');
 
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+  console.log('[Gemini] 📤 Enviando mensaje a Gemini 2.5 Flash...');
+  console.log('[Gemini]    Mensaje a analizar:', JSON.stringify(messageBody));
 
   const response = await ai.models.generateContent({
     model: 'gemini-2.5-flash',
@@ -63,10 +68,41 @@ async function extract(messageBody) {
     },
   });
 
-  const rawText = response.text;
+  console.log('[Gemini] 📥 Respuesta recibida. Tipo de response.text:', typeof response.text);
+
+  // El SDK @google/genai puede devolver `text` como propiedad string O como método.
+  // Normalizamos aquí para cubrir ambos casos.
+  let rawText;
+  if (typeof response.text === 'function') {
+    rawText = response.text();
+    console.log('[Gemini] ℹ️  response.text era una función, se llamó como método.');
+  } else {
+    rawText = response.text;
+  }
+
+  console.log('[Gemini] 📄 Texto raw devuelto por Gemini:', rawText);
+
+  if (!rawText || rawText.trim() === '') {
+    throw new Error('Gemini devolvió una respuesta vacía.');
+  }
+
+  // Limpiamos posibles envoltorios ```json ``` por si el modelo los añade igualmente
+  const cleanedText = rawText
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
 
   // Parseamos y validamos que sea un objeto con las claves esperadas
-  const parsed = JSON.parse(rawText);
+  let parsed;
+  try {
+    parsed = JSON.parse(cleanedText);
+  } catch (parseErr) {
+    console.error('[Gemini] ❌ Error al parsear JSON. Texto recibido:', cleanedText);
+    throw new Error(`JSON inválido recibido de Gemini: ${parseErr.message}`);
+  }
+
+  console.log('[Gemini] ✅ Datos extraídos por IA:', JSON.stringify(parsed));
 
   return {
     nombre: parsed.nombre ?? null,

@@ -35,7 +35,8 @@ const path = require('path');
 
 const { extractDataWithAI } = require('./aiExtractor');
 const { validateConfig, sendTextMessage } = require('./providers/evolutionApi');
-const { getSession, mergeData, isSessionComplete, clearSession } = require('./sessionStore');
+const { getSession, mergeData, isSessionComplete, clearSession, clearSessionField } = require('./sessionStore');
+
 const { validateReservationTime, getAvailableSlotsText } = require('./timeValidator');
 
 // ─────────────────────────────────────────────────────────────
@@ -223,7 +224,8 @@ async function processIncomingMessage(senderPhone, messageBody) {
       // La hora está fuera del horario de apertura: avisar y limpiar el campo
       console.warn(`⚠️  Hora inválida detectada: ${currentSession.hora}`);
       // Eliminamos la hora inválida para que el bot vuelva a preguntar
-      mergeData(senderPhone, { hora: null });
+      clearSessionField(senderPhone, 'hora');
+
 
       try {
         await sendTextMessage(senderPhone, timeCheck.reason);
@@ -326,20 +328,39 @@ function readRequestBody(req) {
  * }
  */
 async function webhookHandler(req, res) {
+  const requestId = Date.now().toString(36).toUpperCase();
+
+  console.log(`\n${'─'.repeat(60)}`);
+  console.log(`[Webhook][${requestId}] 📡 Petición entrante: ${req.method} ${req.url}`);
+  console.log(`[Webhook][${requestId}]    IP: ${req.socket?.remoteAddress ?? 'desconocida'}`);
+
+  // Endpoint de salud — útil para comprobar que el servidor está vivo
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', uptime: process.uptime().toFixed(1) + 's' }));
+    console.log(`[Webhook][${requestId}] ✅ /health respondido OK`);
+    return;
+  }
+
   // Solo procesamos peticiones POST a /webhook
   if (req.method !== 'POST' || req.url !== '/webhook') {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not Found' }));
+    console.log(`[Webhook][${requestId}] ❌ Ruta no encontrada: ${req.method} ${req.url}`);
     return;
   }
 
+  let rawBody;
   let payload;
   try {
-    const rawBody = await readRequestBody(req);
+    rawBody = await readRequestBody(req);
+    console.log(`[Webhook][${requestId}] 📦 Body crudo recibido (primeros 500 chars):`);
+    console.log(rawBody.substring(0, 500));
     payload = JSON.parse(rawBody);
   } catch (_err) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+    console.error(`[Webhook][${requestId}] ❌ Body inválido o no es JSON:`, rawBody?.substring(0, 200));
     return;
   }
 
@@ -349,18 +370,38 @@ async function webhookHandler(req, res) {
 
   // ── Filtros de eventos ────────────────────────────────────
   const event = payload?.event;
-  if (event !== 'messages.upsert') return;
+  console.log(`[Webhook][${requestId}] 🏷️  Evento recibido: "${event}"`);
 
-  const data = payload?.data;
+  if (event !== 'messages.upsert') {
+    console.log(`[Webhook][${requestId}] ⏩ Evento ignorado (no es messages.upsert).`);
+    return;
+  }
+
+  // Evolution API v2 puede enviar data como objeto directo o envuelto en array
+  let data = payload?.data;
+  if (Array.isArray(data)) {
+    console.log(`[Webhook][${requestId}] ℹ️  data es un array con ${data.length} elemento(s). Usando el primero.`);
+    data = data[0];
+  }
+
+  console.log(`[Webhook][${requestId}] 🔍 data.key:`, JSON.stringify(data?.key));
+  console.log(`[Webhook][${requestId}] 🔍 data.message:`, JSON.stringify(data?.message));
+
   const remoteJid = data?.key?.remoteJid ?? '';
   const fromMe = data?.key?.fromMe ?? false;
 
+  console.log(`[Webhook][${requestId}]    remoteJid: ${remoteJid}`);
+  console.log(`[Webhook][${requestId}]    fromMe:    ${fromMe}`);
+
   // Ignorar mensajes enviados por el propio bot
-  if (fromMe) return;
+  if (fromMe) {
+    console.log(`[Webhook][${requestId}] ⏩ Mensaje enviado por el bot (fromMe=true). Ignorado.`);
+    return;
+  }
 
   // Ignorar mensajes de grupos (el JID de grupo termina en @g.us)
   if (remoteJid.endsWith('@g.us')) {
-    console.log(`[IGNORADO] Mensaje de grupo: ${remoteJid}`);
+    console.log(`[Webhook][${requestId}] ⏩ Mensaje de grupo ignorado: ${remoteJid}`);
     return;
   }
 
@@ -369,16 +410,27 @@ async function webhookHandler(req, res) {
 
   // Extraer el texto del mensaje (puede venir en varias propiedades)
   const messageBody =
-    data?.message?.conversation ?? // Texto plano
-    data?.message?.extendedTextMessage?.text ?? // Respuesta con cita
+    data?.message?.conversation ??
+    data?.message?.extendedTextMessage?.text ??
+    data?.message?.imageMessage?.caption ??
+    data?.message?.videoMessage?.caption ??
     '';
 
+  console.log(`[Webhook][${requestId}]    senderPhone: ${senderPhone}`);
+  console.log(`[Webhook][${requestId}]    messageBody: "${messageBody}"`);
+
   // Ignorar mensajes sin texto (imágenes, stickers, etc. sin caption)
-  if (!messageBody.trim()) return;
+  if (!messageBody.trim()) {
+    console.log(`[Webhook][${requestId}] ⏩ Mensaje vacío o sin texto procesable. Ignorado.`);
+    console.log(`[Webhook][${requestId}]    Claves disponibles en data.message:`, Object.keys(data?.message ?? {}));
+    return;
+  }
+
+  console.log(`[Webhook][${requestId}] ➡️  Procesando mensaje de ${senderPhone}...`);
 
   // Procesar de forma asíncrona sin bloquear el servidor
   processIncomingMessage(senderPhone, messageBody).catch((err) => {
-    console.error('❌ Error crítico al procesar mensaje:', err.message);
+    console.error(`[Webhook][${requestId}] ❌ Error crítico al procesar mensaje:`, err.message);
   });
 }
 
